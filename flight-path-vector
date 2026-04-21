@@ -1,0 +1,225 @@
+// ==UserScript==
+// @name         GeoFS Flight Path Vector
+// @namespace    https://raw.githubusercontent.com/tylerbmusic/GeoFS-Flight-Path-Vector
+// @version      1.0.0
+// @description  Displays a Flight Path Vector on the screen - created by GGamerGGuy and improved by skylark1550
+// @author       skylark1550
+// @match        https://www.geo-fs.com/geofs.php?v=*
+// @match        https://*.geo-fs.com/geofs.php*
+// @icon         https://www.google.com/s2/favicons?sz=64&domain=geo-fs.com
+// @grant        none
+// @downloadURL  https://raw.githubusercontent.com/tylerbmusic/GeoFS-Flight-Path-Vector/refs/heads/main/userscript.js
+// @updateURL    https://raw.githubusercontent.com/tylerbmusic/GeoFS-Flight-Path-Vector/refs/heads/main/userscript.js
+// ==/UserScript==
+
+const DEG2RAD = Math.PI / 180;
+const RAD2DEG = 180 / Math.PI;
+
+function cF(x, y, z) { return { x, y, z }; }
+
+function waitForEntities() {
+    try {
+        if (window.geofs && geofs.api && geofs.animation && geofs.aircraft) {
+            main();
+            return;
+        }
+    } catch (e) {
+        console.log('FPV: waiting for GeoFS...', e);
+    }
+    setTimeout(waitForEntities, 1000);
+}
+
+window.onload = setTimeout(waitForEntities, 10000);
+window.howFar = 15;
+
+function main() {
+    'use strict';
+
+    // --- FPV Cesium entity ---
+    window.fpvEntity = geofs.api.viewer.entities.add({
+        position: Cesium.Cartesian3.fromDegrees(geofs.camera.lla[1], geofs.camera.lla[0], geofs.animation.values.groundElevationFeet / 3.2808399),
+        billboard: {
+            image: geofs.api.renderingSettings.resolutionScale <= 0.6
+                ? 'https://tylerbmusic.github.io/GPWS-files_geofs/FPV_Lowres.png'
+                : 'https://tylerbmusic.github.io/GPWS-files_geofs/FPV.png',
+            scale: 0.03 * (1 / geofs.api.renderingSettings.resolutionScale),
+        },
+    });
+
+    let lastLoc = Cesium.Cartesian3.fromDegrees(geofs.camera.lla[1], geofs.camera.lla[0], geofs.camera.lla[2]);
+    let currLoc = lastLoc;
+    let fpvVisible = true;
+
+    // --- Build HUD panel ---
+    const hud = document.createElement('div');
+    hud.id = 'fpv-hud';
+    Object.assign(hud.style, {
+        position: 'fixed',
+        bottom: '40px',
+        right: 'calc(10px + 48px + 16px)',
+        fontFamily: '"Roboto Mono", "Roboto", monospace',
+        fontSize: '13px',
+        color: '#fff',
+        background: 'rgba(0,0,0,0.45)',
+        border: '1px solid rgba(255,255,255,0.18)',
+        borderRadius: '6px',
+        padding: '6px 14px 8px 14px',
+        zIndex: '9999',
+        minWidth: '160px',
+        lineHeight: '1.7',
+        backdropFilter: 'blur(6px)',
+        userSelect: 'none',
+        display: 'none',   // hidden until first airborne update
+    });
+    hud.innerHTML = `
+        <div id="fpv-gs-row" style="display:flex;align-items:center;gap:8px;">
+            <span style="opacity:0.7;font-size:11px;">GS</span>
+            <span id="fpv-gs-val" style="font-weight:bold;">--.-°</span>
+            <canvas id="fpv-gs-bar" width="80" height="10" style="border-radius:3px;"></canvas>
+        </div>
+        <div style="display:flex;gap:8px;">
+            <span style="opacity:0.7;font-size:11px;">AoA</span>
+            <span id="fpv-aoa-val">--.-°</span>
+        </div>
+        <div style="display:flex;gap:8px;">
+            <span style="opacity:0.7;font-size:11px;">V/S</span>
+            <span id="fpv-vs-val">---- fpm</span>
+        </div>
+    `;
+    document.body.appendChild(hud);
+
+    const gsVal  = document.getElementById('fpv-gs-val');
+    const aoaVal = document.getElementById('fpv-aoa-val');
+    const vsVal  = document.getElementById('fpv-vs-val');
+    const gsBar  = document.getElementById('fpv-gs-bar');
+    const gsCtx  = gsBar.getContext('2d');
+
+    // Draw the glideslope deviation bar
+    // deviation: degrees above(+) or below(-) 3° reference
+    function drawGsBar(deviation) {
+        gsCtx.clearRect(0, 0, 80, 10);
+        // background track
+        gsCtx.fillStyle = 'rgba(255,255,255,0.15)';
+        gsCtx.fillRect(0, 3, 80, 4);
+        // 3° reference tick (center)
+        gsCtx.fillStyle = 'rgba(255,255,255,0.5)';
+        gsCtx.fillRect(39, 1, 2, 8);
+
+        const absDev = Math.abs(deviation);
+        const color = absDev <= 0.5 ? '#00e676' : absDev <= 1.0 ? '#ffea00' : '#ff1744';
+        // clamp bar to ±3° range → 40px either side of center
+        const px = Math.max(-40, Math.min(deviation / 3 * 40, 40));
+        gsCtx.fillStyle = color;
+        gsCtx.fillRect(39, 2, px, 6);
+    }
+
+    function getAGL() {
+        try {
+            const cpLen = geofs.aircraft.instance.collisionPoints.length;
+            return (geofs.animation.values.altitude - geofs.animation.values.groundElevationFeet)
+                 + (geofs.aircraft.instance.collisionPoints[cpLen - 2].worldPosition[2] * 3.2808399);
+        } catch (e) {
+            return null;
+        }
+    }
+
+    let lastAlt = null;
+    let lastAltTime = null;
+
+    function update() {
+        if (!fpvVisible) {
+            requestAnimationFrame(update);
+            return;
+        }
+
+        const vals = geofs.animation.values;
+        if (!vals || geofs.isPaused()) {
+            requestAnimationFrame(update);
+            return;
+        }
+
+        const agl = getAGL();
+        const onGround = geofs.aircraft.instance.groundContact;
+
+        // Hide HUD and FPV dot when on ground
+        hud.style.display = (onGround || agl === null) ? 'none' : 'block';
+        if (window.fpvEntity) window.fpvEntity.show = fpvVisible && !onGround;
+
+        if (!onGround && agl !== null) {
+            // --- FPV dot position ---
+            lastLoc = currLoc;
+            currLoc = Cesium.Cartesian3.fromDegrees(geofs.camera.lla[1], geofs.camera.lla[0], geofs.camera.lla[2]);
+            const dx = currLoc.x - lastLoc.x;
+            const dy = currLoc.y - lastLoc.y;
+            const dz = currLoc.z - lastLoc.z;
+
+            if (dx + dy + dz !== 0) {
+                window.fpvEntity.position = cF(
+                    currLoc.x + window.howFar * dx,
+                    currLoc.y + window.howFar * dy,
+                    currLoc.z + window.howFar * dz
+                );
+            }
+
+            // --- Glideslope ---
+            let gsText = '--.-°';
+            let deviation = 0;
+            let hasGs = false;
+            const nav1Dir  = geofs.animation.getValue("NAV1Direction");
+            const nav1Dist = geofs.animation.getValue("NAV1Distance");
+            if (nav1Dir && nav1Dist !== 600 && nav1Dist !== undefined) {
+                const distM = (nav1Dir === "to")
+                    ? (nav1Dist + 600)
+                    : Math.abs(nav1Dist - 600);
+                if (distM > 0) {
+                    const gsAngle = Math.atan((agl * 0.3048) / distM) * RAD2DEG;
+                    deviation = gsAngle - 3.0;   // deviation from 3° reference
+                    gsText = gsAngle.toFixed(1) + '°';
+                    hasGs = true;
+
+                    const absDevColor = Math.abs(deviation) <= 0.5 ? '#00e676' : Math.abs(deviation) <= 1.0 ? '#ffea00' : '#ff1744';
+                    gsVal.style.color = absDevColor;
+                    drawGsBar(deviation);
+                }
+            }
+            if (!hasGs) {
+                gsVal.style.color = '#fff';
+                gsCtx.clearRect(0, 0, 80, 10);
+                gsCtx.fillStyle = 'rgba(255,255,255,0.15)';
+                gsCtx.fillRect(0, 3, 80, 4);
+            }
+            gsVal.textContent = gsText;
+
+            // --- AoA ---
+            const aoa = vals.angleOfAttack !== undefined ? vals.angleOfAttack : null;
+            aoaVal.textContent = aoa !== null ? aoa.toFixed(1) + '°' : '--.-°';
+            aoaVal.style.color = aoa !== null && aoa > 14 ? '#ff1744' : aoa !== null && aoa > 10 ? '#ffea00' : '#fff';
+
+            // --- Vertical speed (fpm) ---
+            const now = performance.now();
+            const altFt = vals.altitude;
+            if (lastAlt !== null && lastAltTime !== null) {
+                const dt = (now - lastAltTime) / 60000; // minutes
+                const vs = Math.round((altFt - lastAlt) / dt);
+                const vsColor = vs < -1500 ? '#ff1744' : vs < -700 ? '#ffea00' : '#fff';
+                vsVal.style.color = vsColor;
+                vsVal.textContent = (vs >= 0 ? '+' : '') + vs.toLocaleString() + ' fpm';
+            }
+            lastAlt = altFt;
+            lastAltTime = now;
+        }
+
+        requestAnimationFrame(update);
+    }
+
+    requestAnimationFrame(update);
+
+    // Toggle with L or V
+    document.addEventListener('keydown', function(e) {
+        if (e.key === 'l' || e.key === 'v') {
+            fpvVisible = !fpvVisible;
+            if (window.fpvEntity) window.fpvEntity.show = fpvVisible;
+            if (!fpvVisible) hud.style.display = 'none';
+        }
+    });
+}
