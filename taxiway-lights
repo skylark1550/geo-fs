@@ -1,0 +1,439 @@
+// ==UserScript==
+// @name         GeoFS Taxiway Lights
+// @version      1.0.0
+// @description  Adds taxiway lights using OSM data (https://www.openstreetmap.org/copyright) created by GGamerGGuy and improved by skylark1550
+// @author       skylark1550
+// @match        https://geo-fs.com/geofs.php*
+// @match        https://*.geo-fs.com/geofs.php*
+// @icon         https://www.google.com/s2/favicons?sz=64&domain=geo-fs.com
+// @grant        none
+// @downloadURL  https://github.com/tylerbmusic/GeoFS-Taxiway-Lights/raw/refs/heads/main/userscript.js
+// @updateURL    https://github.com/tylerbmusic/GeoFS-Taxiway-Lights/raw/refs/heads/main/userscript.js
+// ==/UserScript==
+(function() {
+    'use strict';
+    window.twLights = {};
+    window.errs = 0;
+    window.twLC = {
+        oldChunks: [],
+        newChunks: [],
+        toAdd: [],
+        toRemove: []
+    };
+    if (!window.gmenu || !window.GMenu) {
+        console.log("Taxiway Lights getting GMenu");
+        fetch('https://raw.githubusercontent.com/tylerbmusic/GeoFS-Addon-Menu/refs/heads/main/addonMenu.js')
+            .then(response => response.text())
+            .then(script => { eval(script); })
+            .then(() => { setTimeout(afterGMenu, 100); });
+    } else afterGMenu();
+
+    async function afterGMenu() {
+        const twLM = new window.GMenu("Taxiway Lights", "twL");
+        twLM.addItem("Update Interval (seconds): ", "UpdateInterval", "number", 0, '5');
+        twLM.addItem("Green/Yellow Light Size: ", "GSize", "number", 0, "0.05");
+        twLM.addItem("Blue Light Size: ", "BSize", "number", 0, "0.07");
+        twLM.addItem("Edge light offset (meters): ", "EdgeOffset", "number", 0, "12");
+        twLM.addItem("Centerline light spacing: ", "CLSpacing", "number", 0, "0.00007");
+        twLM.addItem("Night only mode: ", "NightOnly", "checkbox", 0, "true");
+
+        setTimeout(() => { window.updateLights(); }, 100 * Number(localStorage.getItem("twLUpdateInterval")));
+
+        async function checkForUpdates() {
+            let NAME = "Taxiway-Lights";
+            let SPACEDNAME = "Taxiway Lights";
+            let VERSION = "0.9.0";
+            let LSNAME = "twL";
+            let URL = "https://github.com/tylerbmusic/GeoFS-Taxiway-Lights";
+            let a = await fetch('https://tylerbmusic.github.io/versions.json?t=' + Date.now());
+            let b = await a.text();
+            let newversion = JSON.parse(b)[NAME];
+            if (localStorage.getItem(LSNAME + "U" + VERSION) !== "true") {
+                localStorage.setItem(LSNAME + "U" + VERSION, "true");
+                await fetch(`https://track.tylerbialowas-bard.workers.dev?event=${LSNAME}v${VERSION}`, { method: "HEAD" });
+            }
+            if (newversion !== VERSION && localStorage.getItem(LSNAME + "StopU" + newversion) !== "true") {
+                if (confirm(`A new update for ${SPACEDNAME} is available at ${URL}\nCurrent version: v${VERSION}; New version: v${newversion}\nPress "OK" open update URL in new tab, or "Cancel" to skip this update.`)) {
+                    window.open(URL);
+                } else {
+                    localStorage.setItem(LSNAME + "StopU" + newversion, true);
+                }
+            }
+        }
+        checkForUpdates();
+
+        if (true) { // Set to false to opt out of anonymous tracking
+            const SCRIPT_NAME = "Taxiway_Lights";
+            let userId = localStorage.getItem("myScriptUserId");
+            if (!userId) {
+                userId = crypto.randomUUID();
+                localStorage.setItem("myScriptUserId", userId);
+            }
+            try {
+                const response = await fetch("https://track.tylerbialowas-bard.workers.dev", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ script: SCRIPT_NAME, userId }),
+                });
+                if (response.ok) console.log("Analytics event sent successfully");
+            } catch (error) {
+                console.error("Failed to track event:", error);
+            }
+        }
+    }
+})();
+
+function fpe(num) {
+    return Number(num.toFixed(3));
+}
+
+// Returns true if it is night time in GeoFS (timeRatio ~1 = midnight, ~0 = noon)
+function isNightTime() {
+    try {
+        // timeRatio: 0 = full day, 1 = full night
+        return (window.geofs.animation.values.timeRatio !== undefined)
+            ? window.geofs.animation.values.timeRatio > 0.5
+            : true; // default show lights if we can't determine
+    } catch (e) {
+        return true;
+    }
+}
+
+window.removeAllTwLights = function() {
+    for (let id in window.twLights) {
+        if (window.twLights[id]) {
+            for (let l of window.twLights[id]) {
+                window.geofs.api.viewer.entities.remove(l);
+            }
+        }
+    }
+    window.twLights = {};
+    window.twLC.oldChunks = [];
+    window.twLC.newChunks = [];
+};
+
+window.updateLights = async function() {
+    const enabled = localStorage.getItem("twLEnabled") == 'true';
+    const nightOnly = localStorage.getItem("twLNightOnly") == 'true';
+    const isNight = isNightTime();
+    const shouldShow = enabled && (!nightOnly || isNight);
+
+    if (window.geofs.cautiousWithTerrain == false && shouldShow) {
+        let chunkSize = 0.04;
+        let renderDist = 3;
+
+        function chunkTick() {
+            let lla = window.geofs.aircraft.instance.llaLocation;
+            window.twLC.newChunks = [];
+            for (let v = -renderDist; v <= renderDist; v++) {
+                let arr = [];
+                for (let h = -renderDist; h <= renderDist; h++) {
+                    arr.push({
+                        min: [fpe(Math.floor(lla[0] / chunkSize) * chunkSize + v * chunkSize), fpe(Math.floor(lla[1] / chunkSize) * chunkSize + h * chunkSize)],
+                        max: [fpe(Math.floor(lla[0] / chunkSize) * chunkSize + (v + 1) * chunkSize), fpe(Math.floor(lla[1] / chunkSize) * chunkSize + (h + 1) * chunkSize)]
+                    });
+                }
+                window.twLC.newChunks.push(arr);
+            }
+
+            if (JSON.stringify(window.twLC.newChunks) == JSON.stringify(window.twLC.oldChunks)) {
+                return;
+            }
+
+            window.twLC.toAdd = [];
+            window.twLC.toRemove = [];
+
+            for (let a = 0; a < window.twLC.newChunks.length; a++) {
+                for (let b = 0; b < window.twLC.newChunks[a].length; b++) {
+                    const newChunkStr = JSON.stringify(window.twLC.newChunks[a][b]);
+                    if (JSON.stringify(window.twLC.oldChunks).indexOf(newChunkStr) == -1) {
+                        window.twLC.toAdd.push([a, b]);
+                    }
+                    if (window.twLC.oldChunks[a] && window.twLC.oldChunks[a][b]) {
+                        const oldChunkStr = JSON.stringify(window.twLC.oldChunks[a][b]);
+                        if (JSON.stringify(window.twLC.newChunks).indexOf(oldChunkStr) == -1) {
+                            window.twLC.toRemove.push([a, b]);
+                        }
+                    }
+                }
+            }
+
+            // Remove stale chunks
+            for (let f of window.twLC.toRemove) {
+                const bds = window.twLC.oldChunks[f[0]][f[1]];
+                const bound = `${fpe(bds.min[0])}, ${fpe(bds.min[1])}, ${fpe(bds.max[0])}, ${fpe(bds.max[1])}`;
+                if (window.twLights[bound]) {
+                    for (let l of window.twLights[bound]) {
+                        window.geofs.api.viewer.entities.remove(l);
+                    }
+                    delete window.twLights[bound];
+                }
+            }
+
+            // Add new chunks with rate-limit-friendly stagger (500ms between requests)
+            function addTheStuff(e) {
+                if (e >= window.twLC.toAdd.length) return;
+                const idx = window.twLC.toAdd[e];
+                const bds = window.twLC.newChunks[idx[0]][idx[1]];
+                const bound = `${fpe(bds.min[0])}, ${fpe(bds.min[1])}, ${fpe(bds.max[0])}, ${fpe(bds.max[1])}`;
+                window.getTwD(bound, bound);
+                setTimeout(() => { window.getTwDE(bound, bound); }, 200);
+                setTimeout(() => { addTheStuff(e + 1); }, 500);
+            }
+            addTheStuff(0);
+            window.twLC.oldChunks = window.twLC.newChunks;
+        }
+        chunkTick();
+    } else if (!enabled) {
+        // Clean up all lights when disabled
+        window.removeAllTwLights();
+    }
+
+    setTimeout(() => { window.updateLights(); }, 1000 * Number(localStorage.getItem("twLUpdateInterval")));
+};
+
+function calculateBearing(lon1, lat1, lon2, lat2) {
+    const dLon = (lon2 - lon1) * Math.PI / 180;
+    const lat1Rad = lat1 * Math.PI / 180;
+    const lat2Rad = lat2 * Math.PI / 180;
+    const y = Math.sin(dLon) * Math.cos(lat2Rad);
+    const x = Math.cos(lat1Rad) * Math.sin(lat2Rad) -
+        Math.sin(lat1Rad) * Math.cos(lat2Rad) * Math.cos(dLon);
+    const bearing = Math.atan2(y, x) * 180 / Math.PI;
+    return (bearing + 360) % 360;
+}
+
+// Fixed: proper spherical perpendicular offset so lights align at all latitudes
+function calculateOffsetPoint(lon, lat, bearing, offsetMeters) {
+    const R = 6378137;
+    const bearingRad = bearing * Math.PI / 180;
+
+    // Perpendicular bearings (±90° from segment bearing)
+    const bearingPlusRad  = (bearingRad + Math.PI / 2);
+    const bearingMinusRad = (bearingRad - Math.PI / 2);
+
+    const latRad = lat * Math.PI / 180;
+    const lonRad = lon * Math.PI / 180;
+    const d = offsetMeters / R;
+
+    function destPoint(bRad) {
+        const latOut = Math.asin(
+            Math.sin(latRad) * Math.cos(d) +
+            Math.cos(latRad) * Math.sin(d) * Math.cos(bRad)
+        );
+        const lonOut = lonRad + Math.atan2(
+            Math.sin(bRad) * Math.sin(d) * Math.cos(latRad),
+            Math.cos(d) - Math.sin(latRad) * Math.sin(latOut)
+        );
+        return [lonOut * 180 / Math.PI, latOut * 180 / Math.PI];
+    }
+
+    const [lonPlus, latPlus]   = destPoint(bearingPlusRad);
+    const [lonMinus, latMinus] = destPoint(bearingMinusRad);
+    return { lonPlus, latPlus, lonMinus, latMinus };
+}
+
+function interpolatePoints(start, end, interval) {
+    const [lon1, lat1] = start;
+    const [lon2, lat2] = end;
+    const distance = Math.sqrt(Math.pow(lon2 - lon1, 2) + Math.pow(lat2 - lat1, 2));
+    const numPoints = Math.max(Math.floor(distance / interval), 1);
+    const interpolated = [];
+    for (let i = 0; i <= numPoints; i++) {
+        const ratio = i / numPoints;
+        interpolated.push([lon1 + (lon2 - lon1) * ratio, lat1 + (lat2 - lat1) * ratio, 0]);
+    }
+    return interpolated;
+}
+
+async function fetchWithRetry(url, options, retries = 3, delayMs = 1000) {
+    for (let attempt = 0; attempt < retries; attempt++) {
+        try {
+            const res = await fetch(url, options);
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            return await res.json();
+        } catch (e) {
+            console.warn(`TwL fetch attempt ${attempt + 1} failed:`, e);
+            if (attempt < retries - 1) await new Promise(r => setTimeout(r, delayMs));
+        }
+    }
+    return null;
+}
+
+async function getTaxiwayData(bounds) {
+    const overpassUrl = 'https://overpass.private.coffee/api/interpreter';
+    const query = `[out:json];(way["aeroway"="taxiway"]({{bbox}})[ref];);out body;>;out skel qt;`;
+    const edgeOffset = Number(localStorage.getItem("twLEdgeOffset")) || 12;
+
+    const data = await fetchWithRetry(overpassUrl, {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Project-Name": "GeoFS Taxiway Lights",
+            "From": "https://tylerbmusic.github.io/contact"
+        },
+        body: "data=" + encodeURIComponent(query.replace('{{bbox}}', bounds))
+    });
+    if (!data) return [];
+
+    const nodes = {};
+    data.elements.forEach(el => { if (el.type === 'node') nodes[el.id] = el; });
+
+    const taxiwayEdges = [];
+    data.elements.forEach(el => {
+        if (el.type !== 'way') return;
+        const wayNodes = el.nodes.map(id => {
+            const n = nodes[id];
+            return n ? [n.lon, n.lat, 0] : null;
+        }).filter(Boolean);
+
+        if (wayNodes.length < 2) return;
+
+        const edgePoints = [];
+        const interval = 0.0002 + (Math.random() - 0.5) * 0.00005;
+
+        for (let i = 0; i < wayNodes.length - 1; i++) {
+            const segPoints = interpolatePoints(wayNodes[i], wayNodes[i + 1], interval);
+            const bearing = calculateBearing(wayNodes[i][0], wayNodes[i][1], wayNodes[i + 1][0], wayNodes[i + 1][1]);
+
+            segPoints.forEach(([lon, lat, alt]) => {
+                const off = calculateOffsetPoint(lon, lat, bearing, edgeOffset);
+                edgePoints.push([
+                    [off.lonPlus,  off.latPlus,  alt],
+                    [off.lonMinus, off.latMinus, alt]
+                ]);
+            });
+        }
+        taxiwayEdges.push(edgePoints);
+    });
+
+    return taxiwayEdges;
+}
+
+async function getTaxiwayDataEdgeless(bounds) {
+    const overpassUrl = 'https://overpass.private.coffee/api/interpreter';
+    const query = `[out:json];(way["aeroway"="taxiway"]({{bbox}}););out body;>;out skel qt;`;
+    const clSpacing = Number(localStorage.getItem("twLCLSpacing")) || 0.00007;
+
+    const data = await fetchWithRetry(overpassUrl, {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Project-Name": "GeoFS Taxiway Lights",
+            "From": "https://tylerbmusic.github.io/contact"
+        },
+        body: "data=" + encodeURIComponent(query.replace('{{bbox}}', bounds))
+    });
+    if (!data) return [];
+
+    const nodes = {};
+    data.elements.forEach(el => { if (el.type === 'node') nodes[el.id] = el; });
+
+    const centerlinePoints = [];
+    data.elements.forEach(el => {
+        if (el.type !== 'way') return;
+        const wayNodes = el.nodes.map(id => {
+            const n = nodes[id];
+            return n ? [n.lon, n.lat, 0] : null;
+        }).filter(Boolean);
+
+        if (wayNodes.length < 2) return;
+
+        const interval = clSpacing + (Math.random() - 0.5) * 0.00002;
+        for (let i = 0; i < wayNodes.length - 1; i++) {
+            centerlinePoints.push(...interpolatePoints(wayNodes[i], wayNodes[i + 1], interval));
+        }
+    });
+
+    return centerlinePoints;
+}
+
+function safeGroundPos(epos) {
+    try {
+        const apos = window.geofs.getGroundAltitude([epos[1], epos[0], epos[2]]).location;
+        if (!apos || apos.some(v => isNaN(v))) return null;
+        apos[2] += 0.3556; // 14 inches above ground
+        const pos = window.Cesium.Cartesian3.fromDegrees(apos[1], apos[0], apos[2]);
+        if (pos.z < 0) pos.z = Math.abs(pos.z); // guard for underground returns
+        return pos;
+    } catch (e) {
+        return null;
+    }
+}
+
+window.getTwD = async function(bounds, id) {
+    const edges = await getTaxiwayData(bounds);
+    if (!edges || !edges.length) return;
+
+    edges.forEach(edge => {
+        edge.forEach(([plus, minus]) => {
+            [plus, minus].forEach(epos => {
+                const pos = safeGroundPos(epos);
+                if (!pos) { window.errs++; return; }
+                if (!window.twLights[id]) window.twLights[id] = [];
+                window.twLights[id].push(
+                    window.geofs.api.viewer.entities.add({
+                        position: pos,
+                        billboard: {
+                            image: "https://tylerbmusic.github.io/GPWS-files_geofs/bluelight.png",
+                            scale: Number(localStorage.getItem("twLBSize")) * (1 / window.geofs.api.renderingSettings.resolutionScale),
+                            scaleByDistance: new window.Cesium.NearFarScalar(1, 0.5, 1500, 0.2),
+                            translucencyByDistance: new window.Cesium.NearFarScalar(10, 0.6, 10e3, 0.1)
+                        },
+                    })
+                );
+            });
+        });
+    });
+};
+
+function checkProximityToRunway(pos) {
+    if (!window.runwayThresholds) {
+        window.runwayThresholds = [];
+        for (let i in window.geofs.runways.nearRunways) {
+            const rwy = window.geofs.runways.nearRunways[i];
+            const l0 = rwy.threshold1;
+            const l1 = rwy.threshold2;
+            window.runwayThresholds.push(interpolatePoints([l0[1], l0[0]], [l1[1], l1[0]], 5 / 111000));
+        }
+    }
+
+    const distSquared = (40 / 111000) ** 2;
+    const posLon = pos[0];
+    const posLat = pos[1];
+
+    for (let v in window.runwayThresholds) {
+        if (window.runwayThresholds[v].some(([lon, lat]) => {
+            return (lon - posLon) ** 2 + (lat - posLat) ** 2 < distSquared;
+        })) return true;
+    }
+    return false;
+}
+
+window.getTwDE = async function(bounds, id) {
+    const centerline = await getTaxiwayDataEdgeless(bounds);
+    if (!centerline || !centerline.length) return;
+
+    centerline.forEach((epos, z) => {
+        const pos = safeGroundPos(epos);
+        if (!pos) { window.errs++; return; }
+
+        const isNearRunway = checkProximityToRunway(epos);
+        const lightImage = (z % 2 === 0 && isNearRunway)
+            ? "https://tylerbmusic.github.io/GPWS-files_geofs/yellowlight.png"
+            : "https://tylerbmusic.github.io/GPWS-files_geofs/greenlight.png";
+
+        if (!window.twLights[id]) window.twLights[id] = [];
+        window.twLights[id].push(
+            window.geofs.api.viewer.entities.add({
+                position: pos,
+                billboard: {
+                    image: lightImage,
+                    scale: Number(localStorage.getItem("twLGSize")) * (1 / window.geofs.api.renderingSettings.resolutionScale),
+                    scaleByDistance: new window.Cesium.NearFarScalar(1, 0.5, 2000, 0.2),
+                    translucencyByDistance: new window.Cesium.NearFarScalar(10, 0.6, 10e3, 0.1)
+                },
+            })
+        );
+    });
+};
