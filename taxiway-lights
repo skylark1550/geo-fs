@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         GeoFS Taxiway Lights
-// @version      1.0.0
+// @version      1.0.1
 // @description  Adds taxiway lights using OSM data (https://www.openstreetmap.org/copyright) created by GGamerGGuy and improved by skylark1550
 // @author       skylark1550
 // @match        https://geo-fs.com/geofs.php*
@@ -35,30 +35,33 @@
         twLM.addItem("Blue Light Size: ", "BSize", "number", 0, "0.07");
         twLM.addItem("Edge light offset (meters): ", "EdgeOffset", "number", 0, "12");
         twLM.addItem("Centerline light spacing: ", "CLSpacing", "number", 0, "0.00007");
-        twLM.addItem("Night only mode: ", "NightOnly", "checkbox", 0, "true");
+        // When enabled: lights show always. When disabled: lights only show at night.
+        twLM.addItem("Show lights in daytime too: ", "DayMode", "checkbox", 0, "true");
 
         setTimeout(() => { window.updateLights(); }, 100 * Number(localStorage.getItem("twLUpdateInterval")));
 
         async function checkForUpdates() {
             let NAME = "Taxiway-Lights";
             let SPACEDNAME = "Taxiway Lights";
-            let VERSION = "0.9.0";
+            let VERSION = "1.0.1";
             let LSNAME = "twL";
             let URL = "https://github.com/tylerbmusic/GeoFS-Taxiway-Lights";
-            let a = await fetch('https://tylerbmusic.github.io/versions.json?t=' + Date.now());
-            let b = await a.text();
-            let newversion = JSON.parse(b)[NAME];
-            if (localStorage.getItem(LSNAME + "U" + VERSION) !== "true") {
-                localStorage.setItem(LSNAME + "U" + VERSION, "true");
-                await fetch(`https://track.tylerbialowas-bard.workers.dev?event=${LSNAME}v${VERSION}`, { method: "HEAD" });
-            }
-            if (newversion !== VERSION && localStorage.getItem(LSNAME + "StopU" + newversion) !== "true") {
-                if (confirm(`A new update for ${SPACEDNAME} is available at ${URL}\nCurrent version: v${VERSION}; New version: v${newversion}\nPress "OK" open update URL in new tab, or "Cancel" to skip this update.`)) {
-                    window.open(URL);
-                } else {
-                    localStorage.setItem(LSNAME + "StopU" + newversion, true);
+            try {
+                let a = await fetch('https://tylerbmusic.github.io/versions.json?t=' + Date.now());
+                let b = await a.text();
+                let newversion = JSON.parse(b)[NAME];
+                if (localStorage.getItem(LSNAME + "U" + VERSION) !== "true") {
+                    localStorage.setItem(LSNAME + "U" + VERSION, "true");
+                    await fetch(`https://track.tylerbialowas-bard.workers.dev?event=${LSNAME}v${VERSION}`, { method: "HEAD" });
                 }
-            }
+                if (newversion !== VERSION && localStorage.getItem(LSNAME + "StopU" + newversion) !== "true") {
+                    if (confirm(`A new update for ${SPACEDNAME} is available at ${URL}\nCurrent version: v${VERSION}; New version: v${newversion}\nPress "OK" to open update URL, or "Cancel" to skip.`)) {
+                        window.open(URL);
+                    } else {
+                        localStorage.setItem(LSNAME + "StopU" + newversion, true);
+                    }
+                }
+            } catch(e) { console.warn("TwL update check failed", e); }
         }
         checkForUpdates();
 
@@ -87,13 +90,13 @@ function fpe(num) {
     return Number(num.toFixed(3));
 }
 
-// Returns true if it is night time in GeoFS (timeRatio ~1 = midnight, ~0 = noon)
+// GeoFS timeRatio: 0 = night/dark, 1 = full daylight
+// Returns true when it is dark enough to be considered night
 function isNightTime() {
     try {
-        // timeRatio: 0 = full day, 1 = full night
-        return (window.geofs.animation.values.timeRatio !== undefined)
-            ? window.geofs.animation.values.timeRatio > 0.5
-            : true; // default show lights if we can't determine
+        const tr = window.geofs.animation.values.timeRatio;
+        if (tr === undefined) return true; // can't determine, default to show
+        return tr < 0.3; // below 0.3 = dusk/night/dawn
     } catch (e) {
         return true;
     }
@@ -103,7 +106,7 @@ window.removeAllTwLights = function() {
     for (let id in window.twLights) {
         if (window.twLights[id]) {
             for (let l of window.twLights[id]) {
-                window.geofs.api.viewer.entities.remove(l);
+                try { window.geofs.api.viewer.entities.remove(l); } catch(e) {}
             }
         }
     }
@@ -113,10 +116,14 @@ window.removeAllTwLights = function() {
 };
 
 window.updateLights = async function() {
-    const enabled = localStorage.getItem("twLEnabled") == 'true';
-    const nightOnly = localStorage.getItem("twLNightOnly") == 'true';
-    const isNight = isNightTime();
-    const shouldShow = enabled && (!nightOnly || isNight);
+    const enabled  = localStorage.getItem("twLEnabled") == 'true';
+    const dayMode  = localStorage.getItem("twLDayMode") != 'false'; // default true
+    const isNight  = isNightTime();
+
+    // shouldShow: enabled AND (dayMode OR it's night)
+    const shouldShow = enabled && (dayMode || isNight);
+
+    console.log(`TwL: enabled=${enabled} dayMode=${dayMode} isNight=${isNight} shouldShow=${shouldShow} timeRatio=${window.geofs?.animation?.values?.timeRatio}`);
 
     if (window.geofs.cautiousWithTerrain == false && shouldShow) {
         let chunkSize = 0.04;
@@ -158,19 +165,17 @@ window.updateLights = async function() {
                 }
             }
 
-            // Remove stale chunks
             for (let f of window.twLC.toRemove) {
                 const bds = window.twLC.oldChunks[f[0]][f[1]];
                 const bound = `${fpe(bds.min[0])}, ${fpe(bds.min[1])}, ${fpe(bds.max[0])}, ${fpe(bds.max[1])}`;
                 if (window.twLights[bound]) {
                     for (let l of window.twLights[bound]) {
-                        window.geofs.api.viewer.entities.remove(l);
+                        try { window.geofs.api.viewer.entities.remove(l); } catch(e) {}
                     }
                     delete window.twLights[bound];
                 }
             }
 
-            // Add new chunks with rate-limit-friendly stagger (500ms between requests)
             function addTheStuff(e) {
                 if (e >= window.twLC.toAdd.length) return;
                 const idx = window.twLC.toAdd[e];
@@ -185,7 +190,6 @@ window.updateLights = async function() {
         }
         chunkTick();
     } else if (!enabled) {
-        // Clean up all lights when disabled
         window.removeAllTwLights();
     }
 
@@ -199,19 +203,12 @@ function calculateBearing(lon1, lat1, lon2, lat2) {
     const y = Math.sin(dLon) * Math.cos(lat2Rad);
     const x = Math.cos(lat1Rad) * Math.sin(lat2Rad) -
         Math.sin(lat1Rad) * Math.cos(lat2Rad) * Math.cos(dLon);
-    const bearing = Math.atan2(y, x) * 180 / Math.PI;
-    return (bearing + 360) % 360;
+    return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
 }
 
-// Fixed: proper spherical perpendicular offset so lights align at all latitudes
 function calculateOffsetPoint(lon, lat, bearing, offsetMeters) {
     const R = 6378137;
     const bearingRad = bearing * Math.PI / 180;
-
-    // Perpendicular bearings (±90° from segment bearing)
-    const bearingPlusRad  = (bearingRad + Math.PI / 2);
-    const bearingMinusRad = (bearingRad - Math.PI / 2);
-
     const latRad = lat * Math.PI / 180;
     const lonRad = lon * Math.PI / 180;
     const d = offsetMeters / R;
@@ -228,8 +225,8 @@ function calculateOffsetPoint(lon, lat, bearing, offsetMeters) {
         return [lonOut * 180 / Math.PI, latOut * 180 / Math.PI];
     }
 
-    const [lonPlus, latPlus]   = destPoint(bearingPlusRad);
-    const [lonMinus, latMinus] = destPoint(bearingMinusRad);
+    const [lonPlus,  latPlus]  = destPoint(bearingRad + Math.PI / 2);
+    const [lonMinus, latMinus] = destPoint(bearingRad - Math.PI / 2);
     return { lonPlus, latPlus, lonMinus, latMinus };
 }
 
@@ -246,34 +243,42 @@ function interpolatePoints(start, end, interval) {
     return interpolated;
 }
 
-async function fetchWithRetry(url, options, retries = 3, delayMs = 1000) {
-    for (let attempt = 0; attempt < retries; attempt++) {
-        try {
-            const res = await fetch(url, options);
-            if (!res.ok) throw new Error(`HTTP ${res.status}`);
-            return await res.json();
-        } catch (e) {
-            console.warn(`TwL fetch attempt ${attempt + 1} failed:`, e);
-            if (attempt < retries - 1) await new Promise(r => setTimeout(r, delayMs));
+const OVERPASS_MIRRORS = [
+    'https://overpass.private.coffee/api/interpreter',
+    'https://overpass.kumi.systems/api/interpreter',
+    'https://maps.mail.ru/osm/tools/overpass/api/interpreter',
+];
+
+async function fetchWithRetry(query, retries = 2) {
+    for (let mirror of OVERPASS_MIRRORS) {
+        for (let attempt = 0; attempt <= retries; attempt++) {
+            try {
+                const res = await fetch(mirror, {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/x-www-form-urlencoded",
+                        "Project-Name": "GeoFS Taxiway Lights",
+                        "From": "https://tylerbmusic.github.io/contact"
+                    },
+                    body: "data=" + encodeURIComponent(query)
+                });
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                return await res.json();
+            } catch (e) {
+                console.warn(`TwL: mirror ${mirror} attempt ${attempt + 1} failed:`, e.message);
+                if (attempt < retries) await new Promise(r => setTimeout(r, 800));
+            }
         }
+        console.warn(`TwL: mirror ${mirror} exhausted, trying next`);
     }
+    console.error("TwL: all Overpass mirrors failed");
     return null;
 }
 
 async function getTaxiwayData(bounds) {
-    const overpassUrl = 'https://overpass.private.coffee/api/interpreter';
-    const query = `[out:json];(way["aeroway"="taxiway"]({{bbox}})[ref];);out body;>;out skel qt;`;
     const edgeOffset = Number(localStorage.getItem("twLEdgeOffset")) || 12;
-
-    const data = await fetchWithRetry(overpassUrl, {
-        method: "POST",
-        headers: {
-            "Content-Type": "application/x-www-form-urlencoded",
-            "Project-Name": "GeoFS Taxiway Lights",
-            "From": "https://tylerbmusic.github.io/contact"
-        },
-        body: "data=" + encodeURIComponent(query.replace('{{bbox}}', bounds))
-    });
+    const query = `[out:json];(way["aeroway"="taxiway"](${bounds})[ref];);out body;>;out skel qt;`;
+    const data = await fetchWithRetry(query);
     if (!data) return [];
 
     const nodes = {};
@@ -286,7 +291,6 @@ async function getTaxiwayData(bounds) {
             const n = nodes[id];
             return n ? [n.lon, n.lat, 0] : null;
         }).filter(Boolean);
-
         if (wayNodes.length < 2) return;
 
         const edgePoints = [];
@@ -295,7 +299,6 @@ async function getTaxiwayData(bounds) {
         for (let i = 0; i < wayNodes.length - 1; i++) {
             const segPoints = interpolatePoints(wayNodes[i], wayNodes[i + 1], interval);
             const bearing = calculateBearing(wayNodes[i][0], wayNodes[i][1], wayNodes[i + 1][0], wayNodes[i + 1][1]);
-
             segPoints.forEach(([lon, lat, alt]) => {
                 const off = calculateOffsetPoint(lon, lat, bearing, edgeOffset);
                 edgePoints.push([
@@ -306,24 +309,13 @@ async function getTaxiwayData(bounds) {
         }
         taxiwayEdges.push(edgePoints);
     });
-
     return taxiwayEdges;
 }
 
 async function getTaxiwayDataEdgeless(bounds) {
-    const overpassUrl = 'https://overpass.private.coffee/api/interpreter';
-    const query = `[out:json];(way["aeroway"="taxiway"]({{bbox}}););out body;>;out skel qt;`;
     const clSpacing = Number(localStorage.getItem("twLCLSpacing")) || 0.00007;
-
-    const data = await fetchWithRetry(overpassUrl, {
-        method: "POST",
-        headers: {
-            "Content-Type": "application/x-www-form-urlencoded",
-            "Project-Name": "GeoFS Taxiway Lights",
-            "From": "https://tylerbmusic.github.io/contact"
-        },
-        body: "data=" + encodeURIComponent(query.replace('{{bbox}}', bounds))
-    });
+    const query = `[out:json];(way["aeroway"="taxiway"](${bounds}););out body;>;out skel qt;`;
+    const data = await fetchWithRetry(query);
     if (!data) return [];
 
     const nodes = {};
@@ -336,7 +328,6 @@ async function getTaxiwayDataEdgeless(bounds) {
             const n = nodes[id];
             return n ? [n.lon, n.lat, 0] : null;
         }).filter(Boolean);
-
         if (wayNodes.length < 2) return;
 
         const interval = clSpacing + (Math.random() - 0.5) * 0.00002;
@@ -344,7 +335,6 @@ async function getTaxiwayDataEdgeless(bounds) {
             centerlinePoints.push(...interpolatePoints(wayNodes[i], wayNodes[i + 1], interval));
         }
     });
-
     return centerlinePoints;
 }
 
@@ -352,9 +342,9 @@ function safeGroundPos(epos) {
     try {
         const apos = window.geofs.getGroundAltitude([epos[1], epos[0], epos[2]]).location;
         if (!apos || apos.some(v => isNaN(v))) return null;
-        apos[2] += 0.3556; // 14 inches above ground
+        apos[2] += 0.3556;
         const pos = window.Cesium.Cartesian3.fromDegrees(apos[1], apos[0], apos[2]);
-        if (pos.z < 0) pos.z = Math.abs(pos.z); // guard for underground returns
+        if (pos.z < 0) pos.z = Math.abs(pos.z);
         return pos;
     } catch (e) {
         return null;
@@ -364,7 +354,6 @@ function safeGroundPos(epos) {
 window.getTwD = async function(bounds, id) {
     const edges = await getTaxiwayData(bounds);
     if (!edges || !edges.length) return;
-
     edges.forEach(edge => {
         edge.forEach(([plus, minus]) => {
             [plus, minus].forEach(epos => {
@@ -397,15 +386,11 @@ function checkProximityToRunway(pos) {
             window.runwayThresholds.push(interpolatePoints([l0[1], l0[0]], [l1[1], l1[0]], 5 / 111000));
         }
     }
-
     const distSquared = (40 / 111000) ** 2;
-    const posLon = pos[0];
-    const posLat = pos[1];
-
     for (let v in window.runwayThresholds) {
-        if (window.runwayThresholds[v].some(([lon, lat]) => {
-            return (lon - posLon) ** 2 + (lat - posLat) ** 2 < distSquared;
-        })) return true;
+        if (window.runwayThresholds[v].some(([lon, lat]) =>
+            (lon - pos[0]) ** 2 + (lat - pos[1]) ** 2 < distSquared
+        )) return true;
     }
     return false;
 }
@@ -413,16 +398,13 @@ function checkProximityToRunway(pos) {
 window.getTwDE = async function(bounds, id) {
     const centerline = await getTaxiwayDataEdgeless(bounds);
     if (!centerline || !centerline.length) return;
-
     centerline.forEach((epos, z) => {
         const pos = safeGroundPos(epos);
         if (!pos) { window.errs++; return; }
-
         const isNearRunway = checkProximityToRunway(epos);
         const lightImage = (z % 2 === 0 && isNearRunway)
             ? "https://tylerbmusic.github.io/GPWS-files_geofs/yellowlight.png"
             : "https://tylerbmusic.github.io/GPWS-files_geofs/greenlight.png";
-
         if (!window.twLights[id]) window.twLights[id] = [];
         window.twLights[id].push(
             window.geofs.api.viewer.entities.add({
