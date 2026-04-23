@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         GeoFS Minimap
-// @version      1.0.1
+// @version      1.0.2
 // @description  Adds the minimap from MSFS2024 - created by GGamerGGuy and adapted by skylark1550
 // @author       skylark1550
 // @match        https://geo-fs.com/geofs.php*
@@ -59,7 +59,7 @@ window.mapInit = function() {
         border: '2px solid gray',
         top: '40px',
         left: '40px',
-        width: '204px',   // explicit size so Leaflet can measure it correctly
+        width: '204px',
         height: '204px',
         overflow: 'hidden',
     });
@@ -102,15 +102,14 @@ window.mapInit = function() {
     window.theMap = window.L.map('map', {
         zoomSnap: 0,
         zoomDelta: 0.5,
-        zoomAnimation: false,   // prevents flash during zoom transitions
-        fadeAnimation: false,   // prevents tile fade-in flicker
+        zoomAnimation: false,
+        fadeAnimation: false,
         markerZoomAnimation: false,
         preferCanvas: true,
     }).setView([51.505, -0.09], 18);
 
     window.L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
         attribution: '&copy; OpenStreetMap contributors',
-        // Keep tiles cached aggressively so panning doesn't cause blank flashes
         keepBuffer: 4,
         updateWhenIdle: false,
         updateWhenZooming: false,
@@ -119,16 +118,48 @@ window.mapInit = function() {
     window.theMap.zoomControl._container.remove();
     window.theMap.attributionControl._container.remove();
 
-    // Critical: tell Leaflet the true container size after the circular clip is applied
     setTimeout(() => {
         window.theMap.invalidateSize({ animate: false });
     }, 500);
 
-    // Track last-sent values so we only update the map when something meaningful changes
     window._mmLast = { lat: null, lon: null, zoom: null };
 
     window.mapUpdate();
 };
+
+// ── Zoom curve ───────────────────────────────────────────────────────────────
+// Uses a logarithmic scale so the map zooms out quickly from ground level
+// (where you need street-level detail) and slows down at cruise altitude
+// (where you just need country-level context).
+//
+// Breakpoints (approximate):
+//   0 ft       → zoom 18  (street level, ~50m across)
+//   1,000 ft   → zoom 15  (neighbourhood, ~500m)
+//   5,000 ft   → zoom 12  (city, ~5km)
+//   15,000 ft  → zoom 10  (region, ~20km)
+//   35,000 ft  → zoom 8   (country, ~150km)
+//   43,000 ft  → zoom 7   (~300km, Europe-sized chunk visible)
+//
+// Formula: zoom = zoomMax - k * log2(1 + altFt / refAlt)
+//   zoomMax = 18, k and refAlt tuned so 43000ft → ~7
+// ─────────────────────────────────────────────────────────────────────────────
+function altToZoom(altFt) {
+    const zoomMax = 18;
+    const zoomMin = 7;
+    const maxAlt  = 43000;
+
+    // Clamp
+    const alt = Math.max(0, Math.min(altFt, maxAlt));
+
+    // Log curve: 0ft→0, 43000ft→1 in log space
+    // log2(1 + alt/refAlt) normalised so log2(1 + maxAlt/refAlt) = 1
+    // We choose refAlt = maxAlt / (2^range - 1) where range = zoomMax - zoomMin
+    // That gives exactly zoomMin at maxAlt and zoomMax at 0.
+    const range  = zoomMax - zoomMin;           // 11
+    const refAlt = maxAlt / (Math.pow(2, range) - 1);
+    const norm   = Math.log2(1 + alt / refAlt) / range; // 0→1
+    return zoomMax - norm * range;
+}
 
 window.mapUpdate = function() {
     // ── Visibility ───────────────────────────────────────────────────────────
@@ -150,7 +181,7 @@ window.mapUpdate = function() {
         return;
     }
 
-    const cpLen = window.geofs.aircraft.instance.collisionPoints.length;
+    const cpLen  = window.geofs.aircraft.instance.collisionPoints.length;
     const ldgAGL = (av.altitude - av.groundElevationFeet)
                  + (window.geofs.aircraft.instance.collisionPoints[cpLen - 2].worldPosition[2] * 3.2808399);
 
@@ -159,16 +190,12 @@ window.mapUpdate = function() {
     const lon = ll[1];
     const hdg = av.heading360;
 
-    // ── Smooth zoom ──────────────────────────────────────────────────────────
-    const altFt    = Math.max(0, ldgAGL);
-    const altNorm  = Math.min(altFt / 45000, 1);
-    const wantZoom = 18 - altNorm * 5;   // 18 on ground → 13 at 45k ft
+    const wantZoom = altToZoom(Math.max(0, ldgAGL));
 
-    const last = window._mmLast;
-
-    // Only pan/zoom when position changed by >~5m (≈0.00005°) or zoom by >0.05
-    const latDiff  = Math.abs(lat  - (last.lat  ?? lat + 1));
-    const lonDiff  = Math.abs(lon  - (last.lon  ?? lon + 1));
+    // ── Only update map when something meaningful changed ────────────────────
+    const last     = window._mmLast;
+    const latDiff  = Math.abs(lat - (last.lat  ?? lat + 1));
+    const lonDiff  = Math.abs(lon - (last.lon  ?? lon + 1));
     const zoomDiff = Math.abs(wantZoom - (last.zoom ?? wantZoom + 1));
 
     const posChanged  = latDiff > 0.00005 || lonDiff > 0.00005;
