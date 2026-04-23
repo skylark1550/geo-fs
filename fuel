@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GeoFS Fuel
 // @namespace    https://github.com/tylerbmusic/GeoFS-Fuel
-// @version      1.0.0
+// @version      1.0.1
 // @description  Adds fuel to GeoFS (requested by many, made with some help from geofs_pilot) origially built by GGamerGGuy and refined by skylark1550
 // @author       skylark1550
 // @match        https://www.geo-fs.com/geofs.php?v=*
@@ -249,16 +249,17 @@ window.fuelTick = function () {
 
     // ── Refueling ────────────────────────────────────────────────────────────
     if (window.fuel.isRefueling) {
-        const onGround = window.geofs.animation.values.groundContact;
-        const engineOff = !window.geofs.aircraft.instance.engine.on;
-        const stationary = (window.geofs.animation.values.groundSpeed || 0) < 2;
-        const canRefuel = (onGround && engineOff && stationary) || localStorage.getItem("fuelAirRefuel") == 'true';
+        const onGround  = window.geofs.animation.values.groundContact
+                       || (window.geofs.animation.values.groundSpeed || 0) < 1; // fallback if groundContact glitchy
+        const stationary = (window.geofs.animation.values.groundSpeed || 0) < 5; // knots, generous threshold
+        const airRefuel  = localStorage.getItem("fuelAirRefuel") == 'true';
+        const canRefuel  = (onGround && stationary) || airRefuel;
 
         if (!canRefuel) {
             window.fuel.isRefueling = false;
-            alert("To refuel: be on the ground, engine off, and stationary.");
+            alert("To refuel: be on the ground and stationary.");
         } else {
-            const rate = window.fuel.refuelRatePerSec; // gal/sec, signed
+            const rate   = window.fuel.refuelRatePerSec;
             const newLeft = window.fuel.left + rate;
 
             if (rate > 0 && newLeft >= window.fuel.refuelTarget) {
