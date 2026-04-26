@@ -204,10 +204,6 @@ window.fuelTick = function () {
     }
     window.fuel.nextTick += 1000;
 
-    // All mass display in kg
-    const stats = window.fuel.currentStats;
-    const kgPerGal = getKgPerGal(stats);
-
     // ── Aircraft change ──────────────────────────────────────────────────────
     const currentId = Number(window.geofs.aircraft.instance.id);
     if (window.fuel.lastId !== currentId) {
@@ -216,11 +212,15 @@ window.fuelTick = function () {
         window.fuel.capacity = window.fuel.currentStats.capacity;
         window.fuel.left = window.fuel.capacity * 0.5; // start at 50%
         window.fuel.isRefueling = false;
-        // Update max on refuel input (show in kg)
-        const amtEl = document.getElementById("fuelAmount");
-        if (amtEl) amtEl.max = Math.round(window.fuel.capacity * kgPerGal);
         console.log(`Fuel: loaded aircraft ${currentId}`, window.fuel.currentStats);
     }
+
+    // kgPerGal MUST be computed after currentStats is (potentially) updated above
+    const kgPerGal = getKgPerGal(window.fuel.currentStats);
+
+    // Update refuel input max now that we have correct kgPerGal
+    const amtEl = document.getElementById("fuelAmount");
+    if (amtEl && window.fuel.capacity > 0) amtEl.max = Math.round(window.fuel.capacity * kgPerGal);
 
     const lowAlarm = document.getElementById("lowfuel");
     const hudEl = document.getElementById("fuelHUD");
