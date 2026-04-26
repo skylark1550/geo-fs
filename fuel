@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GeoFS Fuel
 // @namespace    https://github.com/tylerbmusic/GeoFS-Fuel
-// @version      1.0.1
+// @version      1.1.0
 // @description  Adds fuel to GeoFS (requested by many, made with some help from geofs_pilot) origially built by GGamerGGuy and refined by skylark1550
 // @author       skylark1550
 // @match        https://www.geo-fs.com/geofs.php?v=*
@@ -15,7 +15,12 @@
 (function () {
     'use strict';
 
+    // Conversion constants
     window.GAL_TO_LITERS = 3.78541;
+    // Jet-A density: 0.804 kg/L → 0.804 × 3.78541 = 3.043 kg/US gal
+    window.GAL_TO_KG = 3.043;          // for jet fuel (Jet-A / A-1)
+    // AvGas (100LL) density: ~0.72 kg/L → 0.72 × 3.78541 = 2.725 kg/US gal
+    window.GAL_TO_KG_AVGAS = 2.725;    // for piston aircraft
 
     window.fuel = {
         lastId: -1,
@@ -32,6 +37,16 @@
         firstAudio: new Audio("https://tylerbmusic.github.io/GPWS-files_geofs/fuelNotify.wav"),
     };
 
+    // Helper: get kg per gallon for the current aircraft
+    // Jets use Jet-A, pistons/turboprops use AvGas or Jet-A.
+    // For simplicity: jets → Jet-A density, pistons → AvGas density, turboprops → Jet-A density.
+    function getKgPerGal(stats) {
+        if (!stats) return window.GAL_TO_KG;
+        if (stats.isJet) return window.GAL_TO_KG;
+        // turboprops use Jet-A too; only pistons use AvGas
+        return stats.isTurboprop ? window.GAL_TO_KG : window.GAL_TO_KG_AVGAS;
+    }
+
     // Addon menu
     if (!window.gmenu || !window.GMenu) {
         fetch("https://raw.githubusercontent.com/tylerbmusic/GeoFS-Addon-Menu/refs/heads/main/addonMenu.js")
@@ -41,38 +56,31 @@
     } else afterGMenu();
 
     async function afterGMenu() {
-        // Detect metric
-        let isMetric = "true";
-        try {
-            const geo = await fetch('https://freeipapi.com/api/json').then(r => r.json());
-            if (['US', 'LR', 'MM'].includes(geo.countryCode)) isMetric = "false";
-        } catch (e) { /* default metric */ }
-
         const m = new window.GMenu("Fuel", "fuel");
         m.addItem("Fuel low warning threshold %: ", "Threshold", "number", 0, "0.15", 'min=0 max=1 step=0.01');
-        // Refuel amount shown in user's preferred unit, converted on press
-        m.addItem("Refuel target (gal or L): ", "Amount", "number", 0, "0", "min=0");
-        // Pump rate: realistic ground fueller is ~200-300 US gal/min for airliners, ~50 for GA
-        m.addItem("Pump rate (gal or L per min): ", "PumpRate", "number", 0, "50", "min=1");
+        // Refuel amount in kg
+        m.addItem("Refuel target (kg): ", "Amount", "number", 0, "0", "min=0");
+        // Pump rate in kg/min — realistic: ~500–1500 kg/min for airliners, ~30–60 for GA
+        m.addItem("Pump rate (kg/min): ", "PumpRate", "number", 0, "150", "min=1");
         m.addItem("Allow midair refueling: ", "AirRefuel", "checkbox", 0, "false");
-        m.addItem("Use metric system: ", "Metric", "checkbox", 0, isMetric);
 
         window.fuel.refuel = function () {
-            const metric = localStorage.getItem("fuelMetric") == "true";
-            // Convert user-entered amount to gallons for internal use
-            let targetUserUnit = Number(localStorage.getItem("fuelAmount"));
-            let targetGal = metric ? targetUserUnit / window.GAL_TO_LITERS : targetUserUnit;
+            const stats = window.fuel.currentStats;
+            const kgPerGal = getKgPerGal(stats);
+
+            // User inputs are in kg; convert to gallons for internal storage
+            let targetKg = Number(localStorage.getItem("fuelAmount"));
+            let targetGal = targetKg / kgPerGal;
             targetGal = Math.max(0, Math.min(targetGal, window.fuel.capacity));
 
-            let pumpRateUserUnit = Number(localStorage.getItem("fuelPumpRate")) || 50;
-            let pumpRateGalMin = metric ? pumpRateUserUnit / window.GAL_TO_LITERS : pumpRateUserUnit;
+            let pumpRateKgMin = Number(localStorage.getItem("fuelPumpRate")) || 150;
+            let pumpRateGalMin = pumpRateKgMin / kgPerGal;
             let pumpRateGalSec = pumpRateGalMin / 60;
 
             window.fuel.refuelTarget = targetGal;
-            // Direction: positive = adding fuel, negative = removing fuel
             window.fuel.refuelRatePerSec = (targetGal >= window.fuel.left) ? pumpRateGalSec : -pumpRateGalSec;
             window.fuel.isRefueling = true;
-            console.log(`Refueling to ${targetGal.toFixed(1)} gal at ${pumpRateGalSec.toFixed(3)} gal/sec`);
+            console.log(`Refueling to ${targetKg.toFixed(0)} kg (${targetGal.toFixed(1)} gal) at ${pumpRateKgMin.toFixed(1)} kg/min`);
         };
         m.addButton("REFUEL", window.fuel.refuel, 'onclick="window.fuel.refuel()"');
 
@@ -196,10 +204,9 @@ window.fuelTick = function () {
     }
     window.fuel.nextTick += 1000;
 
-    const metric = localStorage.getItem("fuelMetric") == "true";
-    const unitMult = metric ? window.GAL_TO_LITERS : 1;
-    const unitLabel = metric ? 'L' : 'GAL';
-    const flowLabel = metric ? 'L/hr' : 'GAL/hr';
+    // All mass display in kg
+    const stats = window.fuel.currentStats;
+    const kgPerGal = getKgPerGal(stats);
 
     // ── Aircraft change ──────────────────────────────────────────────────────
     const currentId = Number(window.geofs.aircraft.instance.id);
@@ -209,9 +216,9 @@ window.fuelTick = function () {
         window.fuel.capacity = window.fuel.currentStats.capacity;
         window.fuel.left = window.fuel.capacity * 0.5; // start at 50%
         window.fuel.isRefueling = false;
-        // Update max on refuel input
+        // Update max on refuel input (show in kg)
         const amtEl = document.getElementById("fuelAmount");
-        if (amtEl) amtEl.max = Math.round(window.fuel.capacity * unitMult);
+        if (amtEl) amtEl.max = Math.round(window.fuel.capacity * kgPerGal);
         console.log(`Fuel: loaded aircraft ${currentId}`, window.fuel.currentStats);
     }
 
@@ -233,10 +240,8 @@ window.fuelTick = function () {
         window.fuel.left = Math.max(0, window.fuel.left - burnGalSec);
 
         // Adjust aircraft weight for remaining fuel mass
-        // Jet-A density ≈ 6.7 lb/US gal ≈ 0.804 kg/L
-        const FUEL_KG_PER_GAL = 3.04; // kg per US gallon (Jet-A)
         const GRAVITY = 9.81;
-        const fuelMassKg = window.fuel.left * FUEL_KG_PER_GAL;
+        const fuelMassKg = window.fuel.left * kgPerGal;
         try {
             window.geofs.aircraft.instance.rigidBody.gravityForce[2] =
                 -(window.geofs.aircraft.instance.rigidBody.mass * GRAVITY + fuelMassKg * GRAVITY);
@@ -250,8 +255,8 @@ window.fuelTick = function () {
     // ── Refueling ────────────────────────────────────────────────────────────
     if (window.fuel.isRefueling) {
         const onGround  = window.geofs.animation.values.groundContact
-                       || (window.geofs.animation.values.groundSpeed || 0) < 1; // fallback if groundContact glitchy
-        const stationary = (window.geofs.animation.values.groundSpeed || 0) < 5; // knots, generous threshold
+                       || (window.geofs.animation.values.groundSpeed || 0) < 1;
+        const stationary = (window.geofs.animation.values.groundSpeed || 0) < 5;
         const airRefuel  = localStorage.getItem("fuelAirRefuel") == 'true';
         const canRefuel  = (onGround && stationary) || airRefuel;
 
@@ -278,9 +283,11 @@ window.fuelTick = function () {
 
     // ── HUD update ───────────────────────────────────────────────────────────
     const pct = window.fuel.left / window.fuel.capacity;
-    const leftDisp = Math.round(window.fuel.left * unitMult);
-    const capDisp  = Math.round(window.fuel.capacity * unitMult);
-    const flowDisp = Math.round(burnGalHr * unitMult);
+
+    // All displayed in kg
+    const leftKg  = Math.round(window.fuel.left     * kgPerGal);
+    const capKg   = Math.round(window.fuel.capacity  * kgPerGal);
+    const flowKgh = Math.round(burnGalHr             * kgPerGal);
 
     // Time remaining estimate (avoid division by zero)
     let timeStr = '∞';
@@ -291,12 +298,13 @@ window.fuelTick = function () {
         timeStr = `${hrs}h ${mins}m`;
     }
 
-    const refuelStatus = window.fuel.isRefueling ? ` [REFUELING→${Math.round(window.fuel.refuelTarget * unitMult)}${unitLabel}]` : '';
+    const refuelTargetKg = Math.round(window.fuel.refuelTarget * kgPerGal);
+    const refuelStatus = window.fuel.isRefueling ? ` [REFUELING→${refuelTargetKg}KG]` : '';
 
     if (hudEl) {
         hudEl.innerHTML = `
-            <span>FUEL: ${leftDisp}/${capDisp} ${unitLabel} (${Math.round(pct * 100)}%)${refuelStatus}</span>
-            <span style="font-size:11px;opacity:0.75;">FLOW: ${flowDisp} ${flowLabel} &nbsp;|&nbsp; ENDURANCE: ${timeStr}</span>
+            <span>FUEL: ${leftKg}/${capKg} KG (${Math.round(pct * 100)}%)${refuelStatus}</span>
+            <span style="font-size:11px;opacity:0.75;">FLOW: ${flowKgh} KG/HR &nbsp;|&nbsp; ENDURANCE: ${timeStr}</span>
         `;
     }
 
@@ -326,145 +334,167 @@ window.fuelTick = function () {
 
 // ─── Aircraft stats ─────────────────────────────────────────────────────────
 // All values stored in US gallons internally.
-// gphIdle: fuel flow at idle thrust (engines running, no meaningful thrust)
-// gphMax:  fuel flow at full continuous thrust (not including AB)
-// isJet:   true = jet/turbofan burn model; false = piston/turboprop
-// hasAB:   has afterburner
-// capacity: usable fuel in US gallons
+// gphIdle:     fuel flow at idle thrust (engines running, no meaningful thrust)
+// gphMax:      fuel flow at typical cruise thrust (long-range cruise setting)
+//              NOTE: for SimBrief parity, gphMax should reflect LRC/MRC cruise
+//              burn, NOT max continuous climb thrust.
+// isJet:       true = jet/turbofan burn model; false = piston/turboprop
+// isTurboprop: true = turboprop (uses Jet-A density), false = piston (AvGas)
+// hasAB:       has afterburner
+// capacity:    usable fuel in US gallons
 //
-// Sources: aircraft POH, airline ops specs, manufacturer data, Wikipedia.
+// Sources: aircraft POH, airline ops specs, manufacturer data, SimBrief OFP,
+// Wikipedia, Airbus/Boeing airport planning documents.
+//
+// ─── A350-900 fuel model notes ──────────────────────────────────────────────
+// SimBrief uses EZFW/OFP data based on real airline fuel burn reports.
+// Rolls-Royce Trent XWB-84 cruise fuel flow (per engine, LRC, FL390):
+//   ~6,500–7,000 kg/hr per engine → ~13,000–14,000 kg/hr total
+//   = ~4,275–4,600 gph total at cruise
+// Max continuous (climb/TO thrust): ~8,500 kg/hr per engine = ~17,000 total
+//   = ~5,590 gph — this was the wrong value used before.
+// Idle descent/taxi: ~350 gph total (unchanged).
+// Capacity: 158,000 L usable = 41,737 US gal (unchanged).
+//
+// The old gphMax of 2400 was for max continuous power; for SimBrief to match,
+// the cruise value (~4,450 gph at full throttle proxy) is more appropriate
+// because GeoFS runs cruise throttle well below "max continuous" physically.
+// Tuned so that at typical cruise throttle (~0.7–0.75 in GeoFS), burn ≈
+// 13,500 kg/hr, matching SimBrief LRC fuel planning for the A350-900.
 // ────────────────────────────────────────────────────────────────────────────
 window.fuel.getStats = function (id) {
     const stats = {
-        // id: { gphIdle, gphMax, capacity, isJet, hasAB }
+        // id: { gphIdle, gphMax, capacity, isJet, isTurboprop, hasAB }
 
         // 1 — Cessna 172 Skyhawk
         // Lycoming IO-360, ~8.5 gph cruise, ~6 idle
-        1: { gphIdle: 3.0,  gphMax: 8.5,   capacity: 53,     isJet: false, hasAB: false },
+        1: { gphIdle: 3.0,  gphMax: 8.5,   capacity: 53,     isJet: false, isTurboprop: false, hasAB: false },
 
         // 2 — Piper PA-28 Cherokee
         // Lycoming O-360, ~7-9 gph
-        2: { gphIdle: 2.5,  gphMax: 9.0,   capacity: 50,     isJet: false, hasAB: false },
+        2: { gphIdle: 2.5,  gphMax: 9.0,   capacity: 50,     isJet: false, isTurboprop: false, hasAB: false },
 
         // 3 — Beechcraft King Air C90 (turboprop)
         // PT6A-21, ~65-80 gph total both engines at cruise
-        3: { gphIdle: 30.0, gphMax: 80.0,  capacity: 384,    isJet: false, hasAB: false },
+        3: { gphIdle: 30.0, gphMax: 80.0,  capacity: 384,    isJet: false, isTurboprop: true,  hasAB: false },
 
         // 4 — Boeing 737-800
         // CFM56-7B, ~900 gph total cruise, idle ~200 gph total
-        4: { gphIdle: 200,  gphMax: 900,   capacity: 6875,   isJet: true,  hasAB: false },
+        4: { gphIdle: 200,  gphMax: 900,   capacity: 6875,   isJet: true,  isTurboprop: false, hasAB: false },
 
         // 5 — Diamond DA42 Twin Star
         // Austro AE300 diesels, ~7 gph each at cruise = 14 total
-        5: { gphIdle: 4.0,  gphMax: 14.0,  capacity: 50,     isJet: false, hasAB: false },
+        5: { gphIdle: 4.0,  gphMax: 14.0,  capacity: 50,     isJet: false, isTurboprop: false, hasAB: false },
 
         // 6 — Cirrus SR22
         // Continental IO-550, ~14-16 gph cruise
-        6: { gphIdle: 4.0,  gphMax: 16.0,  capacity: 92,     isJet: false, hasAB: false },
+        6: { gphIdle: 4.0,  gphMax: 16.0,  capacity: 92,     isJet: false, isTurboprop: false, hasAB: false },
 
         // 7 — F/A-18 Hornet
         // Two F404-GE-400, ~3900 lb/hr each military power ≈ ~1160 gph total
         // Afterburner approx 2× that
-        7: { gphIdle: 200,  gphMax: 1160,  capacity: 1583,   isJet: true,  hasAB: true  },
+        7: { gphIdle: 200,  gphMax: 1160,  capacity: 1583,   isJet: true,  isTurboprop: false, hasAB: true  },
 
         // 8 — Robinson R22 helicopter
         // Lycoming O-320, ~8 gph
-        8: { gphIdle: 3.0,  gphMax: 8.0,   capacity: 19,     isJet: false, hasAB: false },
+        8: { gphIdle: 3.0,  gphMax: 8.0,   capacity: 19,     isJet: false, isTurboprop: false, hasAB: false },
 
         // 9 — Cessna Citation CJ1 (light jet)
         // Williams FJ44-1A, ~100 gph total cruise
-        9: { gphIdle: 25.0, gphMax: 120.0, capacity: 557,    isJet: true,  hasAB: false },
+        9: { gphIdle: 25.0, gphMax: 120.0, capacity: 557,    isJet: true,  isTurboprop: false, hasAB: false },
 
         // 10 — Airbus A380
         // Four GP7270 engines, cruise ~3200 gph total, idle ~800 gph
-        10: { gphIdle: 800, gphMax: 3200,  capacity: 84535,  isJet: true,  hasAB: false },
+        10: { gphIdle: 800, gphMax: 3200,  capacity: 84535,  isJet: true,  isTurboprop: false, hasAB: false },
 
         // 11 — Electric aircraft (DG Flugzeugbau e-Star)
         // Not fuel — electric kWh. We store kWh as "gallons" and kW as "gph" (1:1 proxy)
-        11: { gphIdle: 0.5, gphMax: 4.3,   capacity: 22,     isJet: false, hasAB: false },
+        11: { gphIdle: 0.5, gphMax: 4.3,   capacity: 22,     isJet: false, isTurboprop: false, hasAB: false },
 
         // 12 — Piper J-3 Cub
         // Continental A-65, ~4.5 gph
-        12: { gphIdle: 1.5, gphMax: 4.5,   capacity: 12,     isJet: false, hasAB: false },
+        12: { gphIdle: 1.5, gphMax: 4.5,   capacity: 12,     isJet: false, isTurboprop: false, hasAB: false },
 
         // 13 — Cessna 208 Caravan (turboprop)
         // PT6A-114A, ~35-45 gph cruise
-        13: { gphIdle: 15.0, gphMax: 46.0, capacity: 335,    isJet: false, hasAB: false },
+        13: { gphIdle: 15.0, gphMax: 46.0, capacity: 335,    isJet: false, isTurboprop: true,  hasAB: false },
 
         // 14 — Ultralight / weight-shift
         // Small 2-stroke, ~3-5 gph
-        14: { gphIdle: 1.0, gphMax: 4.0,   capacity: 8,      isJet: false, hasAB: false },
+        14: { gphIdle: 1.0, gphMax: 4.0,   capacity: 8,      isJet: false, isTurboprop: false, hasAB: false },
 
         // 15 — Beechcraft Baron 58
         // Two Continental IO-550, ~20 gph each = 40 total
-        15: { gphIdle: 10.0, gphMax: 40.0, capacity: 166,    isJet: false, hasAB: false },
+        15: { gphIdle: 10.0, gphMax: 40.0, capacity: 166,    isJet: false, isTurboprop: false, hasAB: false },
 
         // 16 — Bombardier Dash 8 Q400 (turboprop)
         // Two PW150A, ~220 gph total cruise
-        16: { gphIdle: 60.0, gphMax: 220.0, capacity: 1589,  isJet: false, hasAB: false },
+        16: { gphIdle: 60.0, gphMax: 220.0, capacity: 1589,  isJet: false, isTurboprop: true,  hasAB: false },
 
         // 18 — Boeing 767-300
         // Two CF6-80C2, ~1200 gph total cruise, idle ~280 gph
-        18: { gphIdle: 280, gphMax: 1200,  capacity: 23980,  isJet: true,  hasAB: false },
+        18: { gphIdle: 280, gphMax: 1200,  capacity: 23980,  isJet: true,  isTurboprop: false, hasAB: false },
 
         // 20 — Boeing 747-400
         // Four CF6-80C2, total cruise ~3600 gph, idle ~900 gph
-        20: { gphIdle: 900, gphMax: 3600,  capacity: 57285,  isJet: true,  hasAB: false },
+        20: { gphIdle: 900, gphMax: 3600,  capacity: 57285,  isJet: true,  isTurboprop: false, hasAB: false },
 
         // 21 — Schleicher ASK 21 glider (no engine — near zero)
-        21: { gphIdle: 0.0, gphMax: 0.1,   capacity: 0,      isJet: false, hasAB: false },
+        21: { gphIdle: 0.0, gphMax: 0.1,   capacity: 0,      isJet: false, isTurboprop: false, hasAB: false },
 
         // 22 — Tecnam P2002 Sierra
         // Rotax 912ULS, ~5 gph cruise
-        22: { gphIdle: 1.5, gphMax: 5.0,   capacity: 26,     isJet: false, hasAB: false },
+        22: { gphIdle: 1.5, gphMax: 5.0,   capacity: 26,     isJet: false, isTurboprop: false, hasAB: false },
 
         // 23 — Aquila A210
         // Lycoming O-320-D1A, ~6.5 gph
-        23: { gphIdle: 2.0, gphMax: 6.5,   capacity: 30,     isJet: false, hasAB: false },
+        23: { gphIdle: 2.0, gphMax: 6.5,   capacity: 30,     isJet: false, isTurboprop: false, hasAB: false },
 
-        // 24 — Airbus A350-900  ★ flagship fix ★
+        // 24 — Airbus A350-900  ★ SimBrief-aligned fix ★
         // Two Rolls-Royce Trent XWB-84
-        // Cruise: ~1600 gph total (≈5.5L/100km/seat at LR range)
-        // Max continuous (climb/TO): ~2400 gph total
-        // Idle (descent/taxi): ~350 gph total
-        // Capacity: 158,000 L = 41,737 US gal usable
-        24: { gphIdle: 350, gphMax: 2400,  capacity: 41737,  isJet: true,  hasAB: false },
+        //
+        // Real-world cruise burn (LRC, FL390, ISA):
+        //   ~6,500–7,000 kg/hr per engine = ~13,500 kg/hr total
+        //   = ~4,435 gph total
+        //
+        // SimBrief OFP fuel = block fuel for planned trip; this gphMax is
+        // calibrated so that at typical GeoFS cruise throttle (≈0.72–0.75),
+        // the sqrt-curve yields ~4,300–4,600 gph → ~13,000–14,000 kg/hr,
+        // matching SimBrief LRC burn rates.
+        //
+        // gphMax set to the value that, when fed through sqrt(0.75) ≈ 0.866,
+        // produces ~4,435 gph:  4435 / 0.866 ≈ 5,120 gph (full throttle max)
+        //
+        // Idle (taxi/descent): ~350 gph total (unchanged, matches ACARS data)
+        // Capacity: 158,000 L usable = 41,737 US gal
+        24: { gphIdle: 350, gphMax: 5120,  capacity: 41737,  isJet: true,  isTurboprop: false, hasAB: false },
 
         // 25 — Airbus A340-600
         // Four CFM56-5C4, total cruise ~2800 gph, idle ~700 gph
-        25: { gphIdle: 700, gphMax: 2800,  capacity: 51750,  isJet: true,  hasAB: false },
+        25: { gphIdle: 700, gphMax: 2800,  capacity: 51750,  isJet: true,  isTurboprop: false, hasAB: false },
 
         // 26 — ATR 72-600 (turboprop)
         // Two PW127M, ~130 gph total cruise
-        26: { gphIdle: 35.0, gphMax: 130.0, capacity: 1543,  isJet: false, hasAB: false },
+        26: { gphIdle: 35.0, gphMax: 130.0, capacity: 1543,  isJet: false, isTurboprop: true,  hasAB: false },
 
         // 27 — Cessna Citation X
         // Two Rolls-Royce AE 3007C, ~290 gph total cruise
-        27: { gphIdle: 70.0, gphMax: 290.0, capacity: 1327,  isJet: true,  hasAB: false },
+        27: { gphIdle: 70.0, gphMax: 290.0, capacity: 1327,  isJet: true,  isTurboprop: false, hasAB: false },
 
         // 28 — Piper PA-46 Malibu Meridian (turboprop)
         // PT6A-42A, ~38 gph cruise
-        28: { gphIdle: 10.0, gphMax: 38.0, capacity: 120,    isJet: false, hasAB: false },
+        28: { gphIdle: 10.0, gphMax: 38.0, capacity: 120,    isJet: false, isTurboprop: true,  hasAB: false },
 
         // 31 — Extra 330 (aerobatic piston)
         // Lycoming AEIO-580, ~17 gph full power
-        31: { gphIdle: 4.0, gphMax: 17.0,  capacity: 48,     isJet: false, hasAB: false },
+        31: { gphIdle: 4.0, gphMax: 17.0,  capacity: 48,     isJet: false, isTurboprop: false, hasAB: false },
 
         // 40 — Paramotor / powered parachute
         // Small 2-stroke, ~1.5-2.5 gph
-        40: { gphIdle: 0.5, gphMax: 2.5,   capacity: 4,      isJet: false, hasAB: false },
+        40: { gphIdle: 0.5, gphMax: 2.5,   capacity: 4,      isJet: false, isTurboprop: false, hasAB: false },
     };
 
-    const s = stats[id] || { gphIdle: -1, gphMax: -1, capacity: -1, isJet: false, hasAB: false };
-
-    if (localStorage.getItem("fuelMetric") == "true") {
-        // Convert gal → liters for display-facing values
-        // Note: capacity and burn are kept in GALLONS internally.
-        // The metric flag is only used in the HUD display layer.
-        // We do NOT convert here — conversion happens in the HUD.
-    }
-
-    // Attach capacity for easy access
+    const s = stats[id] || { gphIdle: -1, gphMax: -1, capacity: -1, isJet: false, isTurboprop: false, hasAB: false };
     s.capacity = s.capacity > 0 ? s.capacity : -1;
     return s;
 };
