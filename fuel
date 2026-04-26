@@ -12,40 +12,35 @@
 // @updateURL    https://github.com/tylerbmusic/GeoFS-Fuel/raw/refs/heads/main/userscript.js
 // ==/UserScript==
 
+// Global constants and helpers — defined OUTSIDE the IIFE so that
+// window.fuelTick, window.fuelInit, window.computeBurnGalPerSec etc.
+// (all defined at global scope later in the file) can always reach them.
+window.GAL_TO_LITERS = 3.78541;
+window.GAL_TO_KG = 3.043;        // Jet-A: 0.804 kg/L × 3.78541 L/gal
+window.GAL_TO_KG_AVGAS = 2.725;  // AvGas 100LL: 0.72 kg/L × 3.78541 L/gal
+
+window.fuel = {
+    lastId: -1,
+    gphIdle: -1,
+    gphMax: -1,
+    capacity: -1,
+    left: -1,
+    isRefueling: false,
+    refuelTarget: -1,
+    refuelRatePerSec: -1,
+    nextTick: -1,
+    firstAudio: new Audio("https://tylerbmusic.github.io/GPWS-files_geofs/fuelNotify.wav"),
+};
+
+window.getKgPerGal = function (stats) {
+    if (!stats) return window.GAL_TO_KG;
+    if (stats.isJet) return window.GAL_TO_KG;
+    // turboprops burn Jet-A; pistons burn AvGas
+    return stats.isTurboprop ? window.GAL_TO_KG : window.GAL_TO_KG_AVGAS;
+};
+
 (function () {
     'use strict';
-
-    // Conversion constants
-    window.GAL_TO_LITERS = 3.78541;
-    // Jet-A density: 0.804 kg/L → 0.804 × 3.78541 = 3.043 kg/US gal
-    window.GAL_TO_KG = 3.043;          // for jet fuel (Jet-A / A-1)
-    // AvGas (100LL) density: ~0.72 kg/L → 0.72 × 3.78541 = 2.725 kg/US gal
-    window.GAL_TO_KG_AVGAS = 2.725;    // for piston aircraft
-
-    window.fuel = {
-        lastId: -1,
-        // gphIdle: fuel burn at idle thrust (gal/hr, stored in gallons internally always)
-        gphIdle: -1,
-        // gphMax: fuel burn at max continuous thrust (gal/hr)
-        gphMax: -1,
-        capacity: -1,       // gallons internally
-        left: -1,           // gallons internally
-        isRefueling: false,
-        refuelTarget: -1,   // gallons internally
-        refuelRatePerSec: -1, // gallons/sec (negative = defuel)
-        nextTick: -1,
-        firstAudio: new Audio("https://tylerbmusic.github.io/GPWS-files_geofs/fuelNotify.wav"),
-    };
-
-    // Helper: get kg per gallon for the current aircraft
-    // Jets use Jet-A, pistons/turboprops use AvGas or Jet-A.
-    // For simplicity: jets → Jet-A density, pistons → AvGas density, turboprops → Jet-A density.
-    window.getKgPerGal = function(stats) {
-        if (!stats) return window.GAL_TO_KG;
-        if (stats.isJet) return window.GAL_TO_KG;
-        // turboprops use Jet-A too; only pistons use AvGas
-        return stats.isTurboprop ? window.GAL_TO_KG : window.GAL_TO_KG_AVGAS;
-    }
 
     // Addon menu
     if (!window.gmenu || !window.GMenu) {
