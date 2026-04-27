@@ -445,24 +445,13 @@ window.fuel.getStats = function (id) {
         // Lycoming O-320-D1A, ~6.5 gph
         23: { gphIdle: 2.0, gphMax: 6.5,   capacity: 30,     isJet: false, isTurboprop: false, hasAB: false },
 
-        // 24 — Airbus A350-900  ★ SimBrief-aligned fix ★
-        // Two Rolls-Royce Trent XWB-84
-        //
-        // Real-world cruise burn (LRC, FL390, ISA):
-        //   ~6,500–7,000 kg/hr per engine = ~13,500 kg/hr total
-        //   = ~4,435 gph total
-        //
-        // SimBrief OFP fuel = block fuel for planned trip; this gphMax is
-        // calibrated so that at typical GeoFS cruise throttle (≈0.72–0.75),
-        // the sqrt-curve yields ~4,300–4,600 gph → ~13,000–14,000 kg/hr,
-        // matching SimBrief LRC burn rates.
-        //
-        // gphMax set to the value that, when fed through sqrt(0.75) ≈ 0.866,
-        // produces ~4,435 gph:  4435 / 0.866 ≈ 5,120 gph (full throttle max)
-        //
-        // Idle (taxi/descent): ~350 gph total (unchanged, matches ACARS data)
+        // 24 — Airbus A350-900
+        // Tuned for GeoFS: full power climb over 61 nm burns ~1800 kg
+        // (591 gal over ~13 min at ~280 kts = ~2725 gph full throttle)
+        // Cruise at ~85% throttle: sqrt(0.85) ≈ 0.922 → ~2100 gph → ~6390 kg/hr
+        // Idle (taxi/descent): 350 gph total
         // Capacity: 158,000 L usable = 41,737 US gal
-        24: { gphIdle: 350, gphMax: 5120,  capacity: 41737,  isJet: true,  isTurboprop: false, hasAB: false },
+        24: { gphIdle: 350, gphMax: 2725, capacity: 41737, isJet: true, isTurboprop: false, hasAB: false },
 
         // 25 — Airbus A340-600
         // Four CFM56-5C4, total cruise ~2800 gph, idle ~700 gph
